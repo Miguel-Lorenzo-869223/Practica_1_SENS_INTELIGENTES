@@ -2,7 +2,9 @@
  * Copyright (c) 2022 EdgeImpulse Inc.
  */
 
-#define EIDSP_QUANTIZE_FILTERBANK   0
+// Optimización de memoria RAM para la banco de filtros
+#define EIDSP_QUANTIZE_FILTERBANK   1
+#define EI_CLASSIFIER_ALLOCATION_STATIC 1  // <--- AÑADIR ESTA LÍNEA
 #define EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW 4
 
 /* Includes ---------------------------------------------------------------- */
@@ -24,15 +26,24 @@ static signed short *sampleBuffer;
 static bool debug_nn = false; 
 static int print_results = -(EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW);
 
+// Temporizador no bloqueante para el LED
+static unsigned long led_turn_off_time = 0;
+
+/* Declaraciones de funciones */
+static bool microphone_inference_start(uint32_t n_samples);
+static bool microphone_inference_record(void);
+static int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr);
+static void microphone_inference_end(void);
+
 void setup()
 {
     Serial.begin(115200);
     while (!Serial);
-    Serial.println("Edge Impulse Inferencing Demo");
+    Serial.println("Edge Impulse Inferencing Demo - Detección ACTIVA");
 
-    // Configurar el LED integrado
+    // Configuración del LED integrado
     pinMode(LED_BUILTIN, OUTPUT);
-    digitalWrite(LED_BUILTIN, LOW); // Apagado de inicio
+    digitalWrite(LED_BUILTIN, LOW);
 
     ei_printf("Inferencing settings:\n");
     ei_printf("\tInterval: %.2f ms.\n", (float)EI_CLASSIFIER_INTERVAL_MS);
@@ -69,21 +80,20 @@ void loop()
 
     if (++print_results >= (EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW)) {
         ei_printf("Predictions ");
-        ei_printf("(DSP: %d ms., Classification: %d ms., Anomaly: %d ms.)",
+        ei_printf("(DSP: %d ms., Classification: %d ms., Anomaly: %d ms.): \n",
             result.timing.dsp, result.timing.classification, result.timing.anomaly);
-        ei_printf(": \n");
 
         for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-            ei_printf("    %s: %.5f\n", result.classification[ix].label,
-                      result.classification[ix].value);
+            ei_printf("    %s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
 
-            // CONTROL DEL LED PARA LA PALABRA "ACTIVA"
-            if (strcmp(result.classification[ix].label, "ACTIVA") == 0) {
-                // Si la certeza es mayor al 70% (0.70), enciende el LED
-                if (result.classification[ix].value > 0.70) {
+            // Control del LED para la palabra "ACTIVA" / "activa"
+            if (strcmp(result.classification[ix].label, "ACTIVA") == 0 || 
+                strcmp(result.classification[ix].label, "activa") == 0) {
+                
+                // Umbral de activación al 50%
+                if (result.classification[ix].value > 0.50f) {
                     digitalWrite(LED_BUILTIN, HIGH);
-                } else {
-                    digitalWrite(LED_BUILTIN, LOW);
+                    led_turn_off_time = millis() + 2000; // Mantiene el LED encendido 2 segundos
                 }
             }
         }
@@ -92,6 +102,11 @@ void loop()
 #endif
 
         print_results = 0;
+    }
+
+    // Apagado del LED tras expirar los 2000 ms
+    if (millis() > led_turn_off_time) {
+        digitalWrite(LED_BUILTIN, LOW);
     }
 }
 
@@ -139,7 +154,8 @@ static bool microphone_inference_start(uint32_t n_samples)
     PDM.onReceive(&pdm_data_ready_inference_callback);
     PDM.setBufferSize((n_samples >> 1) * sizeof(int16_t));
 
-    if (!PDM.begin(1, EI_CLASSIFIER_FREQUENCY)) {
+    // Muestreo fijo a 16 kHz requeridos por el micrófono PDM de la Nano 33 BLE
+    if (!PDM.begin(1, 16000)) {
         ei_printf("Failed to start PDM!");
     }
 
