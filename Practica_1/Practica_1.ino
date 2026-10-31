@@ -2,10 +2,11 @@
  * Copyright (c) 2022 EdgeImpulse Inc.
  */
 
-// Optimización de memoria RAM para la banco de filtros
+// Optimizaciones de memoria indispensables para Arduino Nano 33 BLE
 #define EIDSP_QUANTIZE_FILTERBANK   1
-#define EI_CLASSIFIER_ALLOCATION_STATIC 1  // <--- AÑADIR ESTA LÍNEA
+#define EI_CLASSIFIER_ALLOCATION_STATIC 1
 #define EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW 4
+
 
 /* Includes ---------------------------------------------------------------- */
 #include <PDM.h>
@@ -86,14 +87,13 @@ void loop()
         for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
             ei_printf("    %s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
 
-            // Control del LED para la palabra "ACTIVA" / "activa"
+            // Activación del LED si se reconoce "ACTIVA" o "activa" con probabilidad > 90%
             if (strcmp(result.classification[ix].label, "ACTIVA") == 0 || 
                 strcmp(result.classification[ix].label, "activa") == 0) {
                 
-                // Umbral de activación al 50%
-                if (result.classification[ix].value > 0.50f) {
+                if (result.classification[ix].value > 0.80f) {
                     digitalWrite(LED_BUILTIN, HIGH);
-                    led_turn_off_time = millis() + 2000; // Mantiene el LED encendido 2 segundos
+                    led_turn_off_time = millis() + 2000; // Mantener encendido 2 segundos
                 }
             }
         }
@@ -104,7 +104,7 @@ void loop()
         print_results = 0;
     }
 
-    // Apagado del LED tras expirar los 2000 ms
+    // Apagado del LED tras finalizar los 2000 ms
     if (millis() > led_turn_off_time) {
         digitalWrite(LED_BUILTIN, LOW);
     }
@@ -154,12 +154,12 @@ static bool microphone_inference_start(uint32_t n_samples)
     PDM.onReceive(&pdm_data_ready_inference_callback);
     PDM.setBufferSize((n_samples >> 1) * sizeof(int16_t));
 
-    // Muestreo fijo a 16 kHz requeridos por el micrófono PDM de la Nano 33 BLE
     if (!PDM.begin(1, 16000)) {
         ei_printf("Failed to start PDM!");
+        return false;
     }
 
-    PDM.setGain(127);
+    PDM.setGain(70);
     record_ready = true;
 
     return true;
