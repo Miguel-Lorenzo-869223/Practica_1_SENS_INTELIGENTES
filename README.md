@@ -55,7 +55,7 @@ The classifier evaluates incoming 1-second acoustic frames across the trained au
 
 | Edge Impulse Label | Acoustic Event | Confidence Condition | `LED_BUILTIN` State | Behavior |
 | :--- | :--- | :---: | :---: | :--- |
-| `activa` | Target wake-word spoken | `> 0.70` (`70%`) | 🟠 **ON (`HIGH`)** | Latches ON for `2,000 ms` (non-blocking) |
+| `activa` | Target wake-word spoken | `> 0.90` (`90%`) | 🟠 **ON (`HIGH`)** | Latches ON for `2,000 ms` (non-blocking) |
 | `unknown` | Background noise, silence, or other speech | Any | ⚫ **OFF (`LOW`)** | Remains OFF (or turns OFF once timer expires) |
 
 ---
