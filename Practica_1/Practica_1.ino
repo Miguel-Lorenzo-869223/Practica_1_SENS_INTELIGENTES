@@ -1,199 +1,161 @@
-/* Edge Impulse ingestion SDK
- * Copyright (c) 2022 EdgeImpulse Inc.
- */
+/* Edge Impulse ingestion SDK - Ventana deslizante optimizada para Arduino Nano 33 BLE */
 
-// Optimizaciones de memoria indispensables para Arduino Nano 33 BLE
-#define EIDSP_QUANTIZE_FILTERBANK   1
+// Optimizaciones de memoria y velocidad
+#define EIDSP_QUANTIZE_FILTERBANK       1
 #define EI_CLASSIFIER_ALLOCATION_STATIC 1
-#define EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW 4
-
 
 /* Includes ---------------------------------------------------------------- */
 #include <PDM.h>
 #include <mloren-project-1_inferencing.h>
 
-/** Audio buffers, pointers and selectors */
+// Evaluar cada 250 ms (4 veces por segundo) sobre la ventana de 1 segundo
+#define SLICE_INTERVAL_MS   250
+#define SLICE_SAMPLES       ((EI_CLASSIFIER_FREQUENCY * SLICE_INTERVAL_MS) / 1000)
+
 typedef struct {
-    signed short *buffers[2];
-    unsigned char buf_select;
-    unsigned char buf_ready;
-    unsigned int buf_count;
-    unsigned int n_samples;
+    int16_t *buffer;
+    volatile uint8_t slice_ready;
+    volatile uint32_t slice_count;
 } inference_t;
 
 static inference_t inference;
-static bool record_ready = false;
-static signed short *sampleBuffer;
-static bool debug_nn = false; 
-static int print_results = -(EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW);
+static signed short sampleBuffer[2048];
+static bool debug_nn = false;
 
-// Temporizador no bloqueante para el LED
-static unsigned long led_turn_off_time = 0;
+// Control no bloqueante del LED integrado
+static bool led_active = false;
+static unsigned long led_turn_on_time = 0;
 
 /* Declaraciones de funciones */
-static bool microphone_inference_start(uint32_t n_samples);
-static bool microphone_inference_record(void);
+static bool microphone_inference_start(void);
 static int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr);
 static void microphone_inference_end(void);
 
 void setup()
 {
     Serial.begin(115200);
-    while (!Serial);
-    Serial.println("Edge Impulse Inferencing Demo - Detección ACTIVA");
+    // Espera máximo 2 segundos al Monitor Serie para no bloquear si va con batería
+    unsigned long start = millis();
+    while (!Serial && (millis() - start < 2000));
 
-    // Configuración del LED integrado
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, LOW);
 
-    ei_printf("Inferencing settings:\n");
-    ei_printf("\tInterval: %.2f ms.\n", (float)EI_CLASSIFIER_INTERVAL_MS);
-    ei_printf("\tFrame size: %d\n", EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE);
-    ei_printf("\tSample length: %d ms.\n", EI_CLASSIFIER_RAW_SAMPLE_COUNT / 16);
-    ei_printf("\tNo. of classes: %d\n", sizeof(ei_classifier_inferencing_categories) /
-                                        sizeof(ei_classifier_inferencing_categories[0]));
-
-    run_classifier_init();
-    if (microphone_inference_start(EI_CLASSIFIER_SLICE_SIZE) == false) {
-        ei_printf("ERR: Could not allocate audio buffer (size %d)\r\n", EI_CLASSIFIER_RAW_SAMPLE_COUNT);
+    if (!microphone_inference_start()) {
+        Serial.println("ERR: No se pudo iniciar el microfono o asignar memoria");
         return;
     }
+
+    Serial.println("Listo. Escuchando de forma continua...");
 }
 
 void loop()
 {
-    bool m = microphone_inference_record();
-    if (!m) {
-        ei_printf("ERR: Failed to record audio...\n");
-        return;
+    // 1. Apagar el LED tras 2 segundos encendido
+    if (led_active && (millis() - led_turn_on_time >= 2000)) {
+        digitalWrite(LED_BUILTIN, LOW);
+        led_active = false;
     }
 
+    // 2. Esperar a que entren 250 ms nuevos de audio
+    if (inference.slice_ready == 0) {
+        delay(1);
+        return;
+    }
+    inference.slice_ready = 0;
+
+    // 3. Ejecutar inferencia sobre la ventana completa de 1 segundo
     signal_t signal;
-    signal.total_length = EI_CLASSIFIER_SLICE_SIZE;
+    signal.total_length = EI_CLASSIFIER_RAW_SAMPLE_COUNT;
     signal.get_data = &microphone_audio_signal_get_data;
-    ei_impulse_result_t result = {0};
+    ei_impulse_result_t result = { 0 };
 
-    EI_IMPULSE_ERROR r = run_classifier_continuous(&signal, &result, debug_nn);
+    EI_IMPULSE_ERROR r = run_classifier(&signal, &result, debug_nn);
     if (r != EI_IMPULSE_OK) {
-        ei_printf("ERR: Failed to run classifier (%d)\n", r);
+        Serial.print("ERR: Error en run_classifier: ");
+        Serial.println(r);
         return;
     }
 
-    if (++print_results >= (EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW)) {
-        ei_printf("Predictions ");
-        ei_printf("(DSP: %d ms., Classification: %d ms., Anomaly: %d ms.): \n",
-            result.timing.dsp, result.timing.classification, result.timing.anomaly);
+    // 4. Imprimir todas las clases y activar el LED si se detecta "ACTIVA"
+    for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+        Serial.print(result.classification[ix].label);
+        Serial.print(": ");
+        Serial.print(result.classification[ix].value, 3);
+        Serial.print("  ");
 
-        for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-            ei_printf("    %s: %.5f\n", result.classification[ix].label, result.classification[ix].value);
-
-            // Activación del LED si se reconoce "ACTIVA" o "activa" con probabilidad > 90%
-            if (strcmp(result.classification[ix].label, "ACTIVA") == 0 || 
-                strcmp(result.classification[ix].label, "activa") == 0) {
-                
-                if (result.classification[ix].value > 0.80f) {
-                    digitalWrite(LED_BUILTIN, HIGH);
-                    led_turn_off_time = millis() + 2000; // Mantener encendido 2 segundos
-                }
+        if (strcmp(result.classification[ix].label, "ACTIVA") == 0 ||
+            strcmp(result.classification[ix].label, "activa") == 0) {
+            
+            // Umbral de activación (ajústalo entre 0.60 y 0.80 según lo que veas en Serial)
+            if (result.classification[ix].value > 0.90f) {
+                digitalWrite(LED_BUILTIN, HIGH);
+                led_turn_on_time = millis();
+                led_active = true;
             }
         }
-#if EI_CLASSIFIER_HAS_ANOMALY == 1
-        ei_printf("    anomaly score: %.3f\n", result.anomaly);
-#endif
-
-        print_results = 0;
     }
-
-    // Apagado del LED tras finalizar los 2000 ms
-    if (millis() > led_turn_off_time) {
-        digitalWrite(LED_BUILTIN, LOW);
-    }
+    Serial.println();
 }
 
 static void pdm_data_ready_inference_callback(void)
 {
     int bytesAvailable = PDM.available();
     int bytesRead = PDM.read((char *)&sampleBuffer[0], bytesAvailable);
+    int samplesRead = bytesRead >> 1;
 
-    if (record_ready == true) {
-        for (int i = 0; i < (bytesRead >> 1); i++) {
-            inference.buffers[inference.buf_select][inference.buf_count++] = sampleBuffer[i];
+    // Desplazar el buffer hacia la izquierda y añadir las muestras nuevas al final
+    if (samplesRead > 0 && samplesRead < EI_CLASSIFIER_RAW_SAMPLE_COUNT) {
+        memmove(inference.buffer,
+                &inference.buffer[samplesRead],
+                (EI_CLASSIFIER_RAW_SAMPLE_COUNT - samplesRead) * sizeof(int16_t));
 
-            if (inference.buf_count >= inference.n_samples) {
-                inference.buf_select ^= 1;
-                inference.buf_count = 0;
-                inference.buf_ready = 1;
-            }
+        memcpy(&inference.buffer[EI_CLASSIFIER_RAW_SAMPLE_COUNT - samplesRead],
+               sampleBuffer,
+               samplesRead * sizeof(int16_t));
+
+        inference.slice_count += samplesRead;
+        if (inference.slice_count >= SLICE_SAMPLES) {
+            inference.slice_count = 0;
+            inference.slice_ready = 1;
         }
     }
 }
 
-static bool microphone_inference_start(uint32_t n_samples)
+static bool microphone_inference_start(void)
 {
-    inference.buffers[0] = (signed short *)malloc(n_samples * sizeof(signed short));
-    if (inference.buffers[0] == NULL) return false;
-
-    inference.buffers[1] = (signed short *)malloc(n_samples * sizeof(signed short));
-    if (inference.buffers[1] == NULL) {
-        free(inference.buffers[0]);
+    inference.buffer = (int16_t *)calloc(EI_CLASSIFIER_RAW_SAMPLE_COUNT, sizeof(int16_t));
+    if (inference.buffer == NULL) {
         return false;
     }
 
-    sampleBuffer = (signed short *)malloc((n_samples >> 1) * sizeof(signed short));
-    if (sampleBuffer == NULL) {
-        free(inference.buffers[0]);
-        free(inference.buffers[1]);
-        return false;
-    }
-
-    inference.buf_select = 0;
-    inference.buf_count = 0;
-    inference.n_samples = n_samples;
-    inference.buf_ready = 0;
+    inference.slice_count = 0;
+    inference.slice_ready = 0;
 
     PDM.onReceive(&pdm_data_ready_inference_callback);
-    PDM.setBufferSize((n_samples >> 1) * sizeof(int16_t));
+    PDM.setBufferSize(2048);
 
-    if (!PDM.begin(1, 16000)) {
-        ei_printf("Failed to start PDM!");
+    if (!PDM.begin(1, EI_CLASSIFIER_FREQUENCY)) {
+        microphone_inference_end();
         return false;
     }
 
-    PDM.setGain(70);
-    record_ready = true;
+    // Ganancia del micrófono (prueba entre 30 y 70 según la distancia a la que hables)
+    PDM.setGain(50);
 
     return true;
 }
 
-static bool microphone_inference_record(void)
-{
-    bool ret = true;
-
-    if (inference.buf_ready == 1) {
-        ei_printf("Error sample buffer overrun.\n");
-        ret = false;
-    }
-
-    while (inference.buf_ready == 0) {
-        delay(1);
-    }
-
-    inference.buf_ready = 0;
-    return ret;
-}
-
 static int microphone_audio_signal_get_data(size_t offset, size_t length, float *out_ptr)
 {
-    numpy::int16_to_float(&inference.buffers[inference.buf_select ^ 1][offset], out_ptr, length);
+    numpy::int16_to_float(&inference.buffer[offset], out_ptr, length);
     return 0;
 }
 
 static void microphone_inference_end(void)
 {
     PDM.end();
-    free(inference.buffers[0]);
-    free(inference.buffers[1]);
-    free(sampleBuffer);
+    free(inference.buffer);
 }
 
 #if !defined(EI_CLASSIFIER_SENSOR) || EI_CLASSIFIER_SENSOR != EI_CLASSIFIER_SENSOR_MICROPHONE
