@@ -1,4 +1,10 @@
-/* Edge Impulse ingestion SDK - Ventana deslizante optimizada para Arduino Nano 33 BLE */
+// ------------------------------------------------------------
+//  Author: Miguel A.Lorenzo
+//  Date: 25/11/2026
+//  Subject: Smart Sensors (Sensores Inteligentes)
+//  Master: MSc in Electronic Engineering
+//  University: University of Zaragoza EINA/UNIZAR
+// ------------------------------------------------------------
 
 // Optimizaciones de memoria y velocidad
 #define EIDSP_QUANTIZE_FILTERBANK       1
